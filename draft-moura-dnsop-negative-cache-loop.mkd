@@ -1,0 +1,254 @@
+---
+title:  Negative Caching of Looping NS records
+abbrev: Considerations-Large-Auth-DNS-Ops  
+docname: draft-moura-dnsop-negative-cache-loop-00
+date:
+
+# stand_alone: true
+
+ipr: trust200902
+area: Internet
+wg: DNSOP Working Group  
+kw: Internet-Draft
+cat: std
+#consensus: true
+
+coding: us-ascii
+pi:    # can use array (if all yes) or hash here
+#  - toc
+#  - sortrefs
+#  - symrefs
+  toc: yes
+  sortrefs:   # defaults to yes
+  symrefs: yes
+
+author:
+      -
+        ins: G. C.M. Moura
+        name: Giovane C. M. Moura
+        org: SIDN Labs/TU Delft
+        street: Meander 501
+        city: Arnhem
+        code: 6825 MD
+        country: NL
+        phone: +31 26 352 5500
+        email: giovane.moura@sidn.nl
+      -
+        ins: W. Hardaker
+        name: Wes Hardaker
+        org: USC/Information Sciences Institute
+        street: PO Box 382
+        city: Davis
+        code: 95617-0382
+        country: US
+        phone:  +1 (530) 404-0099
+        email: ietf@hardakers.net
+      -
+        ins: J. Heidemann
+        name: John Heidemann
+        org: USC/Information Sciences Institute
+        street: 4676 Admiralty Way
+        city: Marina Del Rey
+        code: 90292-6695
+        country: US
+        phone:  +1 (310) 448-8708
+        email: johnh@isi.edu        
+      -
+       ins: S. Castro
+       name: Sebastian Castro
+       org: IE Domain Registry
+       city:  Dublin
+       street: 2 Harbour Square, Dún Laoghaire
+       code: A96 D6R0
+       country: IE
+       phone: +353 1 2365400
+       email: scastro@weare.ie
+
+normative:
+
+  RFC1034:
+  RFC1035:
+#  RFC2181:
+  RFC2308:
+  #RFC7094:
+  #RFC1546:
+  RFC1035:
+ # RFC1995:
+  RFC2119:
+  #RFC5575:
+  #RFC5936:
+#  RFC4271:
+  #RFC4786:
+  #RFC1997:
+#  RFC8499:
+#  RFC6891:
+
+informative:
+
+  RFC1536:
+  ##RFC4033:
+  #RFC4034:
+ # RFC4035:
+  #RFC4509:
+  Moura21b:
+      title: TsuNAME - exploiting misconfiguration and vulnerability to DDoS DNS
+      target: https://www.isi.edu/%7ejohnh/PAPERS/Moura21b.pdf
+      author:
+        -
+          name: Giovane C. M. Moura
+        -
+          name: Sebastian Castro
+        -
+          name: John Heidemann
+        -
+          name: Wes Hardaker
+          
+      date:  2016-11-02
+      seriesinfo:
+        ACM: 2021 Internet Measurement Conference
+        DOI: 10.1145/3487552.3487824
+     
+--- abstract
+
+This document updates guidance about detecting DNS loops in recursive resolver algorithms with new requirements to require recursive resolvers to detect loops and to implement negative caches.
+
+--- middle
+
+Introduction    {#intro}
+============
+
+Loops are a well-known configuration error in DNS zones. CNAME loops were first documented in {{RFC1034}}, and can occur when two domains point to each other. For example:
+
+.org zone file:
+
+	 example.org CNAME example.com
+	 
+.com zone file:
+
+	example.com CNAME example.org
+	
+
+{{RFC1536}} states that "a set of servers might form a loop wherein A refers to B and B refers to A". Although RFC1536 did not explicitly define other types of loops, others can also occur using NS records, as shown in the example below:
+
+.org zone file:
+	
+	example.org NS  ns1.example.com
+	
+	example.org NS  ns2.example.com
+
+.com zone file:
+	
+	example.com NS  ns1.example.org
+	
+    example.com NS  ns2.example.org
+
+
+In both the CNAME and NS loop cases, recursive resolvers will not be able to resolve these domain names, or any child domains underneath these zones.
+
+
+## Requirements notation
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY",
+   and "OPTIONAL" in this document are to be interpreted as described
+   in BCP 14 {{RFC2119}} {{?RFC8174}} when, and only when, they appear
+   in all capitals, as shown here.
+
+
+# Past solutions {#related}
+
+The first solution was proposed in RFC1034, which states that CNAME loops  should be "signalled (sic) as an error" (Section 3.6.2). 
+To avoid resolvers starting to loop infinitely in presence of configuration errors,  RFC1034  also recommends that resolvers limit the number of queries it sends out when resolving an individual domain name. {{RFC1035}} stipulates that resolvers should use counters to implement these limits.
+
+Later, {{RFC1536}} states that "a set of servers might form a loop wherein A refers to B and B refers to A". It does not, however, specify what type of records might create these loops. Additionally, it offers no new solutions beyond what RFC1034 and RFC1035 suggested.
+
+In short, {{RFC1034}}, {{RFC1035}} and {{RFC1536}} describe the problem and do provide guidance to resolver implementers to help avoid indefinite loops in the presence of misconfigured zone files with NS or CNAME loops. However, we continue to observe different forms of this problem and so here we seek to clarify that guidance.
+
+# Current Problem
+
+Recent research{{Moura21b}} has shown how NS configuration loops can lead to significant increases in traffic: New Zealand's .nz country-code top-level domain (a ccTLD) experienced a 50% traffic surge when two domains were misconfigured with NS loops. Another anonymous European ccTLD saw its traffic grow by 10-fold when two subdomains were also miscofigured with NS loops. {{Moura21b}} also reproduced the experiments under multiple controlled scenarios.
+
+If existing RFCs already provide solution for looping misconfiguration ({{related}}), how come recent research {{Moura21b}} still showed that these loops exist in the wild and lead to such traffic surges?
+
+## Root Causes of Traffic Surge
+
+{{Moura21b}} documents two main sources of amplification in the presence of NS loops: 
+
+
+* Looping recursive resolvers: these are resolvers that send non-stop queries to authoritative servers after receiving a single client query ({{recuath}}) targeting a domain with an NS loop. Such recursive resolvers do not conform to the guidance in RFC1034 and RFC1035, both of which set limits to the number queries a resolver should send when resolving a name.
+
+* Looping clients, stub-resolvers, and forwarders: another situation occurs when parts of the DNS infrastructure, behind a recursive resolver, send non-stop queries in the presence of NS loops. These queries ultimately reach their upstream recursive resolvers, which then send queries to authoritative servers (and which themselves may further amplify the query stream).
+
+To illustrate this, consider  {{recuath}}.  The Current RFCs provide solutions to prevent recursive resolvers from looping. Assume  a client sends a query to its stub resolver, which they will forward to one of its locally configured recursive resovlers (Re1 and Re2). Assuming Re2 receives the query, it will then carry out the recursive recursion tasks. The current solutions limit the number of queries that Re2 will send to authoritative servers (AT2) when resolving the domain -- so the recursive resolver itself prevents looping. The recursive resolver should answer the client with a SERVFAIL error code in response.
+
+However, this does not protect clients, stubs, or DNS forwarders (as Re1, which forwards to Re3) to start to repeatedly asking the same query. If, for example, Re2 sends up to 20 queries when resolving a domain name, every new  incoming client query can trigger up to new 20 queries. This was exactly the problem the researchers found in Google Public DNS' implementation.
+
+            +-----+  +-----+  +-----+ +-----+
+            | AT1 |  | AT2 |  | AT3 |   | AT4 |
+            +-----+  +-----+  +-----+ +-----+
+              ^         ^             ^        ^
+              |            |             |           |
+              |       +-----+        |           |
+              +------| Re3 |----+|           |
+                      +-----+                    |
+                          ^                        |
+                          |                          |
+                     +----+   +----+         |
+                     |Re1 |   |Re2 |---------+
+                     +----+   +----+
+                       ^          ^
+                        |           |
+                        | +------+ 
+                          +-|stub|
+                         +------+
+                              ^
+                               |
+                        | +--------+
+                       +-| client |
+                          +--------+
+{: #recuath title="Relationship between clients, stub, recursive resolvers (Re) and authoritative name servers (ATn)"}
+
+
+
+
+
+# New requirement
+
+Besides following the recommendations from RFC1034, RFC1035 and RFC2181 for handling loops, this memo requires that recursive resolvers MUST detect loop and MUST cache these records (negative caching){{RFC2308}}.  Recursive resolvers need to refrain from forwarding queries from clients/stub/forwarders  to misconfigured domain names when a negative answer can be answered from its cache.
+
+How long these loops should be cached for is an implementation choice; however, recursive results MUST answer from it's cache for at least 15 minutes, given that most looping NS/CNAME record situations will require human intervention.
+
+# Operational considerations
+
+TBD
+
+# Security considerations
+
+TBD
+
+<!-- verified against RFC3552 - MD -->
+
+# Privacy Considerations
+
+<!-- Add some remarkt according to RFC6973. Or should we name this "Human Rights considerations" according to RFC8280 - MD -->
+
+This document does not add any practical new privacy issues, aside from possible benefits in deploying longer TTLs which in turn requires less traffic to be sent and thus preserves privacy by query omission: longer TTLs may help preserve a user's privacy by reducing the number of requests that get transmitted in both the client-to-resolver and resolver-to-authoritative cases.
+
+# IANA considerations
+
+This document has no IANA actions.
+<!-- RFC8126 style - MD -->
+
+--- back
+
+# Acknowledgements
+
+TBD
+
+# Current implemenations
+
+The requirements in this document have been implemented and deployed by:
+
++ Google Public DNS
++ Cisco OpenDNS
+
